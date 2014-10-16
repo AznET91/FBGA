@@ -57,6 +57,7 @@ output		     [6:0]		HEX3;
 	reg init = 1;
     reg [15:0]f_pc = 0;
     reg [15:0]pc_next = 0;
+    reg [15:0]pc_temp = 0;
     
     reg [15:0]d_pc = 0;
     wire [3:0]op;
@@ -73,12 +74,19 @@ output		     [6:0]		HEX3;
     wire[15:0]x_res;
     wire x_wren;
     wire [2:0]x_dest;
+    wire [15:0]x_dv;
+    wire [16:0]x_jmp;
+    wire x_halt;
     wire [1:0]mem_access;
 
     wire [15:0]m_res; 
     wire m_wren;
     wire [2:0]m_dest;
     wire m_store;
+    wire m_load;
+    wire [15:0]m_data;
+    wire [16:0]m_jmp;
+    wire m_halt;
 
     wire clk = KEY[0];
     reg [3:0]whichreg;
@@ -86,7 +94,11 @@ output		     [6:0]		HEX3;
     wire [15:0]f_inst;
     wire [15:0]d_inst;
     wire [15:0]x_inst;
-    wire [16:0]jmp;
+
+    reg store = 0;
+    reg [15:0]store_mem = 0;
+    reg load = 0;
+    reg [15:0]data = 0;
 
 	assign LEDR = d_pc[9:0];
 	assign LEDG = 0;
@@ -98,20 +110,27 @@ output		     [6:0]		HEX3;
 	ram prog(
         .address(pc_next),          // address is registered
         .clock(clk),
-        .data(0),
+        .data(store ? data : 0),
         .rden(1),     				// RDEN is also registered
-        .wren(m_store),
+        .wren(store),
         .q(f_inst));
 
 	always @(*) begin
+		pc_temp = f_pc + 1;
+
 		if (init) begin
 			pc_next = 0;
 		end
 		else begin
-			if (jmp[16] == 1)
-				pc_next = f_pc + 1;
-			else
-				pc_next = jmp - 1;
+			if (store || m_load) begin
+					pc_next = store_mem;
+			end
+			else begin
+				if (m_jmp[16])
+					pc_next = f_pc + 1;
+				else
+					pc_next = m_jmp;
+			end
 		end
 	end
 
@@ -137,7 +156,7 @@ output		     [6:0]		HEX3;
 
     decode d_stage (
     	clk, 
-    	(jmp[16] == 0) ? 16'h0000 : f_inst, 
+    	(m_jmp[16] == 0 || m_halt) ? 16'h0000 : f_inst, 
     	f_pc,
     	op,
     	d_r1,
@@ -150,7 +169,7 @@ output		     [6:0]		HEX3;
 
     execute x_stage(
     	clk, 
-    	(jmp[16] == 0) ? 7 : d_dest,
+    	(m_jmp[16] == 0 || m_halt) ? 7 : d_dest,
     	d_wren, 
     	op, 
     	d_r1,
@@ -160,19 +179,29 @@ output		     [6:0]		HEX3;
     	x_res, 
     	x_wren, 
     	x_dest,
+    	x_dv,
     	mem_access,
-    	jmp
+    	x_jmp,
+    	x_halt
     );
 
     memory m_stage(
     	clk, 
-    	mem_access,
+    	(m_jmp[16] == 0) ? 0 : mem_access,
     	x_res, 
     	x_wren, 
-    	x_dest, 
+    	(m_jmp[16] == 0) ? 7 : x_dest, 
+    	x_dv,
+    	x_jmp,
+    	m_halt ? 1 : x_halt,
     	m_res, 
     	m_wren, 
-    	m_dest
+    	m_dest,
+    	m_store,
+    	m_load,
+    	m_data,
+    	m_jmp,
+    	m_halt
     );
 
     rf get_rval(
@@ -181,24 +210,28 @@ output		     [6:0]		HEX3;
     	.b(f_inst[2:0]),
     	.c(m_dest),
     	.d(whichreg), 
-    	.wrval(m_res), 
-    	.wren((m_dest == 7) ? 0 : m_wren),
+    	.wrval(m_load ? f_inst : m_res), 
+    	.wren(m_load ? 1 : (m_dest == 7) ? 0 : m_wren),
     	.ret1(d_reg1),
     	.ret2(d_reg2),
     	.display(rval)
     );
 
-	seg7 d0(SW[9] ? d_oprand2 : 
-			SW[8] ? res :
+	seg7 d0(SW[9] ? f_pc[3:0] : 
+			SW[8] ? pc_next[3:0] :
+			SW[7] ? store_mem[3:0] :
 			SW[3] ? f_inst[3:0] : rval[3:0], HEX0);
-    seg7 d1(SW[9] ? d_r2 : 
-    		SW[8] ? mem_access :
+    seg7 d1(SW[9] ? f_pc[7:4] : 
+    		SW[8] ? pc_next[7:4] :
+    		SW[7] ? store_mem[7:4] :
     		SW[3] ? f_inst[7:4] : rval[7:4], HEX1);
-    seg7 d2(SW[9] ? d_r1 : 
-    		SW[8] ? x_wren :
+    seg7 d2(SW[9] ? f_pc[11:8] : 
+    		SW[8] ? pc_next[11:8] :
+    		SW[7] ? data :
     		SW[3] ? f_inst[11:8] : rval[11:8], HEX2);
-    seg7 d3(SW[9] ? d_dest : 
-    		SW[8] ? x_dest :
+    seg7 d3(SW[9] ? f_pc[15:12] : 
+    		SW[8] ? pc_next[15:12] :
+    		SW[7] ? store :
     		SW[3] ? f_inst[15:12] : rval[15:12], HEX3);    
 
      always @(posedge clk) begin
@@ -207,7 +240,19 @@ output		     [6:0]		HEX3;
     		f_pc <= pc_next;
 		end 
 		else begin
-			f_pc <= pc_next;	
+			if (m_store || m_load)
+				f_pc <= pc_temp;
+			else begin 
+				if (m_halt)
+					f_pc <= f_pc;
+				else
+					f_pc <= pc_next;
+			end
+
+			store <= m_store;
+			store_mem <= m_res;
+			data <= m_data;
+
 	    	d_pc <= f_pc;
 	    	x_pc <= d_pc;
     	end
@@ -304,7 +349,6 @@ module decode(clk, d_inst, d_pc, op, d_r1, d_r2, oprand1, oprand2, d_dest, d_wre
 			end
 
 			4'b1011 : begin 	//store
-				write = 1;
 				if (f == 0) begin
 					d_ra = d_inst[7:5];
 					d_vb = d_inst[4:0];
@@ -342,7 +386,7 @@ module decode(clk, d_inst, d_pc, op, d_r1, d_r2, oprand1, oprand2, d_dest, d_wre
 
 			4'b1111 : begin	
 				if (d_inst == 16'hffff) begin	//halt
-					d_va = d_pc;
+					d_va = d_pc - 1;
 				end
 				else begin						//brz
 					if (f == 0) begin
@@ -370,7 +414,7 @@ module decode(clk, d_inst, d_pc, op, d_r1, d_r2, oprand1, oprand2, d_dest, d_wre
     end
 endmodule
 
-module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res, wren, x_dest, mem_access, jmp);
+module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res, wren, x_dest, x_dv, mem_access, x_jmp, x_halt);
 	input clk;
 	input [2:0]d_dest;
 	input d_wren;
@@ -383,26 +427,34 @@ module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res,
 	output [15:0]res;
 	output wren;
 	output [2:0]x_dest;
+	output [15:0]x_dv;
 	output [1:0]mem_access;
-	output [16:0]jmp;
+	output [16:0]x_jmp;
+	output x_halt;
 
 	reg [15:0]temp;
 	reg [15:0]res;
 	reg wren;
 	reg [2:0]x_dest;
+	reg [15:0]x_dv;
 	reg [2:0]dest;
-	reg [16:0]jmp;
+	reg [16:0]x_jmp;
+	reg x_halt;
 
 	reg [15:0]regs[7:0];
 	reg [1:0]mem_access;
-	reg [16:0]x_jmp;
+	reg [16:0]jmp;
 	reg [1:0]mem;
+	reg [15:0]dv;
+	reg halt;
 
 	always @(*) begin
 		temp = 0;
 		dest = 7;
-		x_jmp = 17'b10000000000000000;
+		jmp = 17'b10000000000000000;
 		mem = 0;
+		dv = 0;
+		halt = 0;
 		case(x_op)
 			4'b0000 : begin 	//add
 				dest = d_dest;
@@ -429,6 +481,7 @@ module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res,
 			end
 
 			4'b1010 : begin		//load
+				dest = d_dest;
 				mem = 1;
 				if (x_r1 < 8)
 					temp = regs[x_r1] + x_oprand2;
@@ -438,6 +491,7 @@ module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res,
 
 			4'b1011 : begin 	//store
 				mem = 2;
+				dv = regs[d_dest];
 				if (x_r1 < 8)
 					temp = regs[x_r1] + x_oprand2;
 				else
@@ -456,23 +510,24 @@ module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res,
 				dest = d_dest;
 				if (x_r1 < 8) begin
 					temp = x_oprand1;
-					x_jmp = regs[x_r1] + x_oprand2;
+					jmp = regs[x_r1] + x_oprand2;
 				end
 				else begin
 					temp = x_oprand1;
-					x_jmp = x_oprand1 + x_oprand2;
+					jmp = x_oprand1 + x_oprand2;
 				end
 			end
 
 			4'b1111 : begin		//halt
 				if (x_r1 == 8 && x_oprand2 == 0) begin
-					x_jmp = x_oprand1;
+					jmp = x_oprand1;
+					halt = 1;
 				end
 				else begin		//brz
 					if (x_r1 < 8) 
-						x_jmp = (regs[d_dest] == 0) ? (regs[x_r1] + x_oprand2) : 17'b10000000000000000;
+						jmp = (regs[d_dest] == 0) ? (regs[x_r1] + x_oprand2) : 17'b10000000000000000;
 					else
-						x_jmp = (regs[d_dest] == 0) ? (x_oprand1 + x_oprand2) : 17'b10000000000000000;
+						jmp = (regs[d_dest] == 0) ? (x_oprand1 + x_oprand2) : 17'b10000000000000000;
 				end
 			end
 		endcase
@@ -481,44 +536,66 @@ module execute(clk, d_dest, d_wren, x_op, x_r1, x_r2, x_oprand1, x_oprand2, res,
 	always @(posedge clk) begin  
 		res <= temp;
 		wren <= d_wren;
+		x_jmp <= jmp;
+		x_dv <= dv;
+		mem_access <= mem;
 		x_dest <= dest;
-		jmp <= x_jmp;
+		x_halt <= halt;
 
 		if (dest != 7 && d_wren)
 			regs[dest] <= temp;
-
-		mem_access <= mem;
     end
 endmodule
 
-module memory(clk, mem_access, x_res, x_wren, x_dest, m_res, m_wren, m_dest, m_store);
+module memory(clk, mem_access, x_res, x_wren, x_dest, x_dv, x_jmp, x_halt, m_res, m_wren, m_dest, m_store, m_load, m_data, m_jmp, m_halt);
 	input clk;
-	input mem_access;
+	input [1:0]mem_access;
 	input [15:0]x_res;
 	input x_wren;
 	input [2:0]x_dest;
+	input [15:0]x_dv;
+	input [16:0]x_jmp;
+	input x_halt;
 
 	output [15:0]m_res;
 	output m_wren;
 	output [2:0]m_dest;
 	output m_store;
+	output m_load;
+	output [15:0]m_data;
+	output [16:0]m_jmp;
+	output m_halt;
 
 	reg [15:0]m_res;
 	reg m_wren;
 	reg [2:0]m_dest;
 	reg m_store;
+	reg m_load;
+	reg [15:0]m_data;
+	reg [16:0]m_jmp;
+	reg m_halt;
 
 	reg [15:0]m_ld;
 	reg [15:0]m_st;
+	reg [15:0]data;
+	reg [1:0]cnt = 2;
+	reg halt;
 
 	always @(*) begin
+		data = 0;
+		halt = 0;
 		if (mem_access > 0) begin
 			if (mem_access == 1) begin	//ld
 				m_ld = x_res;
 			end
 			else begin					//st
 				m_st = x_res;
+				data = x_dv;
 			end
+		end
+
+		if (x_halt) begin
+			halt = 1;
 		end
 	end
 
@@ -526,6 +603,29 @@ module memory(clk, mem_access, x_res, x_wren, x_dest, m_res, m_wren, m_dest, m_s
 		m_res <= x_res;
 		m_wren <= x_wren;
 		m_dest <= x_dest;
+		m_data <= data;
+		m_halt <= halt;
+
+		if (cnt > 0) begin
+			cnt <= cnt - 1;
+			m_jmp <= 17'b10000000000000000;
+			m_halt <= 0;
+		end
+		else begin
+			m_jmp <= x_jmp;
+			m_halt <= halt;
+		end
+
+		if (mem_access == 2) 
+			m_store <= 1;
+		else begin
+			if (mem_access == 1)
+				m_load <= 1;
+			else begin
+				m_load <= 0;
+				m_store <= 0;
+			end
+		end
     end
 endmodule
 
